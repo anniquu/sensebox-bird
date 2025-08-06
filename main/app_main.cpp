@@ -13,43 +13,25 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "include/BirdPostProcessor.hpp"
+#include "esp_camera.h"
 
-// support IDF 5.x
+// Support IDF 5.x
 #ifndef portTICK_RATE_MS
 #define portTICK_RATE_MS portTICK_PERIOD_MS
 #endif
-// Set to true to take a camera picture.
-#define TAKE_PICTURE false
-#include "esp_camera.h"
-
-extern const uint8_t cat_jpg_start[] asm("_binary_bluetit_jpg_start");
-extern const uint8_t cat_jpg_end[] asm("_binary_bluetit_jpg_end");
-extern const uint8_t espdl_model[] asm("_binary_torch_mbnv2_layerwise_equalization_espdl_start");
 
 const char *TAG2 = "bird_cls";
-#if TAKE_PICTURE
-#define CAMERA_MODEL_XIAO_ESP32S3 // Has PSRAM
 
-#define PWDN_GPIO_NUM -1
-#define RESET_GPIO_NUM -1
-#define XCLK_GPIO_NUM 10
-#define SIOD_GPIO_NUM 40
-#define SIOC_GPIO_NUM 39
+extern const uint8_t birb_jpg_start[] asm("_binary_bluetit_jpg_start");
+extern const uint8_t birb_jpg_end[] asm("_binary_bluetit_jpg_end");
+extern const uint8_t espdl_model[] asm("_binary_torch_mbnv2_layerwise_equalization_espdl_start");
 
-#define Y9_GPIO_NUM 48
-#define Y8_GPIO_NUM 11
-#define Y7_GPIO_NUM 12
-#define Y6_GPIO_NUM 14
-#define Y5_GPIO_NUM 16
-#define Y4_GPIO_NUM 18
-#define Y3_GPIO_NUM 17
-#define Y2_GPIO_NUM 15
-#define VSYNC_GPIO_NUM 38
-#define HREF_GPIO_NUM 47
-#define PCLK_GPIO_NUM 13
-static const char *TAG = "example:take_picture";
+// Set to true to take a camera picture, else make sure to add an img
+#define TAKE_PICTURE true
 
-#if ESP_CAMERA_SUPPORTED
+#if TAKE_PICTURE && ESP_CAMERA_SUPPORTED
+#include "camera_pins.h"
+
 // Camera Module pin mapping
 static camera_config_t camera_config = {
     .pin_pwdn = PWDN_GPIO_NUM,
@@ -66,87 +48,96 @@ static camera_config_t camera_config = {
     .pin_d2 = Y4_GPIO_NUM,
     .pin_d1 = Y3_GPIO_NUM,
     .pin_d0 = Y2_GPIO_NUM,
+
     .pin_vsync = VSYNC_GPIO_NUM,
     .pin_href = HREF_GPIO_NUM,
     .pin_pclk = PCLK_GPIO_NUM,
 
-    // XCLK 20MHz or 10MHz for OV2640 double FPS (Experimental)
-    .xclk_freq_hz = 20000000,
+    .xclk_freq_hz = 20000000, // XCLK 20MHz or 10MHz for OV2640 double FPS (Experimental)
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
 
-    // Change to PIXFORMAT_RGB888
-    .pixel_format = PIXFORMAT_JPEG,  // YUV422,GRAYSCALE,RGB565,JPEG
-    .frame_size = FRAMESIZE_240X240, // QQVGA-UXGA Do not use sizes above QVGA when not JPEG
+    .pixel_format = PIXFORMAT_RGB565, // PIXFORMAT_RGB565 , PIXFORMAT_JPEG
+    .frame_size = FRAMESIZE_QVGA,     // [<<320x240>> (QVGA, 4:3);FRAMESIZE_320X320, 240x176 (HQVGA, 15:11); 400x296 (CIF, 50:37)],FRAMESIZE_QVGA,FRAMESIZE_VGA
 
-    .jpeg_quality = 12, // 0-63 lower number means higher quality
-    .fb_count = 1,      // if more than one, i2s runs in continuous mode. Use only with JPEG
+    .jpeg_quality = 8, // 0-63 lower number means higher quality.  Reduce quality if stack overflow in cam_task
+    .fb_count = 2,     // if more than one, i2s runs in continuous mode. Use only with JPEG
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+    .sccb_i2c_port = 0 // optional
 };
 
-static esp_err_t init_camera(void)
-{
-    // initialize the camera
+static esp_err_t init_camera(void) {
+    // Initialize the camera
     esp_err_t err = esp_camera_init(&camera_config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Camera Init Failed");
-        return err;
+        ESP_LOGE("CAM", "Camera Init Failed");
     }
-
-    return ESP_OK;
+    return err;
 }
-#endif
-#endif
-extern "C" void app_main(void)
-{
-#if TAKE_PICTURE
-#if ESP_CAMERA_SUPPORTED
-    if (ESP_OK != init_camera()) {
-        return;
+
+static bool capture_image(dl::image::img_t &output_img) {
+    ESP_LOGI("CAM", "Taking picture...");
+    camera_fb_t *pic = esp_camera_fb_get();
+    if (!pic) {
+        ESP_LOGE("CAM", "Failed to capture image");
+        return false;
     }
 
-    ESP_LOGI(TAG, "Taking picture...");
-    camera_fb_t *pic = esp_camera_fb_get();
-
-    // use pic->buf to access the image
-    ESP_LOGI(TAG, "Picture taken! Its size was: %zu bytes", pic->len);
-    esp_camera_fb_return(pic);
-
-#else
-    ESP_LOGE(TAG, "Camera support is not available for this chip");
-    return;
-#endif
-#endif
+    // Use pic->buf to access the image
+    ESP_LOGI("CAM", "Picture taken! Its size was: %zu bytes", pic->len);
+    ESP_LOGW("image_dim", "Height: %d, Width: %d, Len: %zu", pic->height, pic->width, pic->len);
 
     // dl::image::jpeg_img_t jpeg_img = {
-    //     .data = (uint8_t *) pic->buf,
-    //     .width = (int) pic->width,
-    //     .height = (int) pic->height,
+    //     .data = (uint8_t *)pic->buf,
+    //     .width = (int)pic->width,
+    //     .height = (int)pic->height,
     //     .data_size = (uint32_t)(pic->len),
     // };
-    dl::image::jpeg_img_t jpeg_img = {
-        .data = (uint8_t *)cat_jpg_start,
-        .width = 160,
-        .height = 160,
-        .data_size = (uint32_t)(cat_jpg_end - cat_jpg_start),
-    };
 
-    dl::image::img_t img;
-    img.pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888;
-    sw_decode_jpeg(jpeg_img, img, true);
+    // Prepare ESP-DL image structs
+    dl::image::img_t rgb565_img;
+    rgb565_img.data = pic->buf;
+    rgb565_img.height = pic->height;
+    rgb565_img.width = pic->width;
+    rgb565_img.pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB565;
 
+    output_img.height = pic->height;
+    output_img.width = pic->width;
+    output_img.pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888;
+    output_img.data = malloc(pic->height * pic->width * 3); // RGB888: 3 bytes per pixel
+
+    if (!output_img.data) {
+        ESP_LOGE("MEM", "Memory allocation failed");
+        esp_camera_fb_return(pic);
+        return false;
+    }
+
+    // Convert using ESP-DL
+    int x_min = 0;
+    int x_max = 160;
+    int y_min = 0;
+    int y_max = 160;
+    std::vector<int> crop_area = {x_min, y_min, x_max, y_max};
+    dl::image::convert_img(rgb565_img, output_img, 0, nullptr, crop_area);
+
+    esp_camera_fb_return(pic);
+    return true;
+}
+#endif // TAKE_PICTURE && ESP_CAMERA_SUPPORTED
+
+static const dl::cls::result_t *run_inference(dl::image::img_t &input_img) {
     char dir[64];
     // TODO: as we are testing multiple models we might want to include them in a smarter way. Is there something like command line arguments?
     snprintf(dir, sizeof(dir), "%s/espdl_models", CONFIG_BSP_SD_MOUNT_POINT);
-    dl::Model* model = new dl::Model((const char *)espdl_model, dir);
+    dl::Model *model = new dl::Model((const char *)espdl_model, dir);
 
     uint32_t t0, t1;
     float delta;
     t0 = esp_timer_get_time();
 
-    dl::image::ImagePreprocessor* m_image_preprocessor = new dl::image::ImagePreprocessor(model, {123.675, 116.28, 103.53}, {58.395, 57.12, 57.375});
-    m_image_preprocessor->preprocess(img);
+    dl::image::ImagePreprocessor *m_image_preprocessor = new dl::image::ImagePreprocessor(model, {123.675, 116.28, 103.53}, {58.395, 57.12, 57.375});
+    m_image_preprocessor->preprocess(input_img);
 
     model->run();
     const int check = 5;
@@ -156,10 +147,54 @@ extern "C" void app_main(void)
     t1 = esp_timer_get_time();
     delta = t1 - t0;
     printf("Inference in %8.0f us.", delta);
-    
-    for (const auto &res : results) {
-         ESP_LOGI(TAG2, "category: %s, score: %f\n", res.cat_name, res.score);
+
+    const dl::cls::result_t *best_result = nullptr;
+
+    for (auto &res : results) {
+        ESP_LOGI(TAG2, "category: %s, score: %f\n", res.cat_name, res.score);
+        if (best_result == nullptr || res.score > best_result->score)
+        {
+            best_result = &res;
+        }
     }
-    delete model;
+
+    // Free resources
+    if (model) {
+        delete model;
+        model = nullptr;
+    }
+    if (m_image_preprocessor) {
+        delete m_image_preprocessor;
+        m_image_preprocessor = nullptr;
+    }
+
+    return best_result;
+}
+
+extern "C" void app_main(void) {
+    dl::image::img_t img;
+
+#if TAKE_PICTURE && ESP_CAMERA_SUPPORTED
+    if (init_camera() != ESP_OK || !capture_image(img)) {
+        return;
+    }
+#else
+    // If an example image is used
+    dl::image::jpeg_img_t jpeg_img = {
+        .data = (uint8_t *)birb_jpg_start,
+        .width = 160,
+        .height = 160,
+        .data_size = (uint32_t)(birb_jpg_end - birb_jpg_start),
+    };
+    img.pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888;
+    sw_decode_jpeg(jpeg_img, img, true);
+#endif
+
+    const auto *best = run_inference(img);
+    if (best) {
+        ESP_LOGI(TAG2, "Best: %s (score: %f)", best->cat_name, best->score);
+    }
+
     heap_caps_free(img.data);
+    ESP_LOGI("MEM", "Free heap at end of loop: %lu bytes", esp_get_free_heap_size());
 }
