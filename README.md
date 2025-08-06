@@ -1,11 +1,3 @@
-| Supported Targets | ESP32-S3 | ESP32-P4 |
-| ----------------- | -------- | -------- |
-
-
-# IMAGENET classification Example
-
-Mobilenetv2 is now supported.
-
 # Example Output
 
 After the flashing you should see the output at idf monitor:
